@@ -1,6 +1,16 @@
 # 🌳 Calculadora Interativa de Propriedades Elásticas para Madeira (Ortotropia)
 
+![Getting Started](./figuras/captura_de_tela.png)
+
 Este é um aplicativo web interativo construído com Streamlit para calcular as **9 Constantes Elásticas (Módulos de Elasticidade e Coeficientes de Poisson)** e as **Matrizes de Rigidez ($\bm{C}_{ij}$) e Flexibilidade ($\bm{S}_{ij}$)** de amostras de madeira, com base em medições de velocidade de ondas ultrassônicas (método de Christoffel).
+
+<div style="text-align: center;">
+  <img src="./figuras/front-view.png" width="45%" alt="Imagem 1" /> 
+  <img src="./figuras/top-view.png" width="45%" alt="Imagem 2" />
+  <p style="font-style: italic; color: #555; margin-top: 10px;">
+        Poliedro de 26 lados com vistas frontal e superior, respectivamente.
+    </p>
+</div>
 
 O objetivo é fornecer uma ferramenta de análise de dados limpa, interativa e robusta, que inclui validações diagnósticas e opções de visualização científica.
 
