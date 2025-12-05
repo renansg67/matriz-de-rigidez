@@ -3,10 +3,66 @@ import pandas as pd
 import numpy as np
 import warnings
 from poliedro import create_polyhedron_figure
-from wolfram_notebook import mathematica_code
 
 # Ignorar FutureWarning do Pandas/NumPy no Streamlit
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+mathematica_code = """
+(* Definição de constantes e dimensões em mm *)
+Lmenor = {L_MENOR_FIXO};
+Htronco = {H_TRONCO_FIXO};
+Hprisma = {H_PRISMA_FIXO};
+
+(* Lmaior é forçado para ser a altura do prisma, para que as faces do prisma sejam quadradas *)
+Lmaior = Hprisma;
+
+(* Raio do Octógono (Circunraio R = L / (2 Sin[Pi/8])) *)
+R[L_] := L / (2 Sin[Pi/8]);
+Rmenor = R[Lmenor]; (* {poly_dims['R_menor']:.4f} mm *)
+Rmaior = R[Lmaior]; (* {poly_dims['R_maior']:.4f} mm *)
+
+(* Alturas Z dos 4 anéis de 8 vértices *)
+Z1 = 0;
+Z2 = Htronco; (* {H_TRONCO_FIXO:.1f} *)
+Z3 = Htronco + Hprisma; (* {H_TRONCO_FIXO + H_PRISMA_FIXO:.1f} *)
+Z4 = 2 Htronco + Hprisma; (* {poly_dims['Z4']:.1f} *)
+
+(* Geração de coordenadas para um octógono de raio R no plano XY *)
+Vcoord[R_, Z_] := Table[
+    {{N[R Cos[phi]], N[R Sin[phi]], Z}},
+    {{phi, N[Pi/8], N[2 Pi - Pi/8], N[Pi/4]}}
+];
+
+(* As 32 Coordenadas dos Vértices *)
+vertices = Join[
+    Vcoord[Rmenor, Z1],  (* V1 a V8: Base Menor, Z=0 *)
+    Vcoord[Rmaior, Z2],  (* V9 a V16: Seção Maior Inferior, Z={H_TRONCO_FIXO:.1f} *)
+    Vcoord[Rmaior, Z3],  (* V17 a V24: Seção Maior Superior, Z={H_TRONCO_FIXO + H_PRISMA_FIXO:.1f} *)
+    Vcoord[Rmenor, Z4]   (* V25 a V32: Topo Menor, Z={poly_dims['Z4']:.1f} *)
+];
+
+(* Lista de Faces (2 Octogonais + 24 Quadrilaterais) *)
+faces = Join[
+    (* F1: Base Octogonal Menor (V1-V8) *)
+    {{Range[8]}},
+    (* F2: Topo Octogonal Menor (V25-V32) *)
+    {{Range[25, 32]}},
+    
+    (* F3-F10: Tronco Inferior (V1-V8 para V9-V16) *)
+    Table[{{i, i + 8, If[i < 8, i + 9, 9], If[i < 8, i + 1, 1]}}, {{i, 1, 8}}],
+    (* F11-F18: Prisma Central (V9-V16 para V17-V24) - Retângulos *)
+    Table[{{i + 8, i + 16, If[i < 8, i + 17, 17], If[i < 8, i + 9, 9]}}, {{i, 1, 8}}],
+    (* F19-F26: Tronco Superior (V17-V24 para V25-V32) *)
+    Table[{{i + 16, i + 24, If[i < 8, i + 25, 25], If[i < 8, i + 17, 17]}}, {{i, 1, 8}}]
+];
+
+(* Comando de Renderização do Poliedro no Mathematica *)
+Polyhedron[vertices, faces,
+    PlotLabel -> "Poliedro de 26 Faces (Tronco-Prisma-Tronco)",
+    Boxed -> True,
+    FaceGrids -> All
+]
+"""
 
 # --- Configurações Iniciais do Streamlit ---
 st.set_page_config(layout="wide", page_title="Calculadora de Propriedades Elásticas Editável e Diagnóstica")
@@ -333,115 +389,142 @@ def calcular_propriedades_elasticas(df_amostra, nome_amostra):
 
     return propriedades_list, df_rigidez, df_flexibilidade, diagnostico_list, C_matrix, S_matrix
 
+# --- SEÇÃO PRINCIPAL DO STREAMLIT (FLUXO DINÂMICO) ---
 
-# --- SEÇÃO PRINCIPAL DO STREAMLIT ---
-
-uploaded_file = st.sidebar.file_uploader("1. Arraste e solte o arquivo CSV", type=["csv"])
+uploaded_file = st.sidebar.file_uploader("0. Arraste e solte o arquivo CSV", type=["csv"])
 
 if uploaded_file is not None:
     try:
-        # Carregar o CSV e pré-processar
+        # Carregar o CSV
         df_completo = pd.read_csv(uploaded_file, decimal=',', sep=',')
         colunas_esperadas = ['Amostra', 'Densidade (kg/m³)', 'Direção', 'Distância (cm)', 'Tempo (μs)']
-        # Garante que apenas as colunas necessárias e existentes sejam usadas
         df_completo = df_completo[[col for col in colunas_esperadas if col in df_completo.columns]].copy()
         
-        # Converte para numérico, tratando erros
+        # Converte para numérico
         for col in ['Densidade (kg/m³)', 'Distância (cm)', 'Tempo (μs)']:
             df_completo[col] = pd.to_numeric(df_completo[col], errors='coerce')
         
-        # --- 2. EDITA O DATAFRAME COMPLETO ---
-        st.header("2. Edite os Dados de Entrada")
-        st.info("Ajuste Densidade, Distância (cm) e Tempo (μs).")
+        # Cria um DataFrame base no state, para persistir edições entre abas
+        if 'data_state' not in st.session_state:
+            st.session_state.data_state = df_completo
+            
+        todas_amostras = sorted(st.session_state.data_state['Amostra'].unique())
         
-        df_editado = st.data_editor(df_completo, num_rows="dynamic", width='stretch',
-            column_config={
-                "Distância (cm)": st.column_config.NumberColumn(format="%.3f"),
-                "Tempo (μs)": st.column_config.NumberColumn(format="%.2f"),
-                "Densidade (kg/m³)": st.column_config.NumberColumn(format="%.2f")
-            }
-        )
-        
-        df_editado.dropna(subset=['Densidade (kg/m³)', 'Distância (cm)', 'Tempo (μs)'], inplace=True)
-        # Calcula a Velocidade: V (m/s) = (D (cm) / T (μs)) * 10000
-        df_editado['Velocidade (m/s)'] = (df_editado['Distância (cm)'] / df_editado['Tempo (μs)']) * 10000
-        
-        todas_amostras = sorted(df_editado['Amostra'].unique())
-        
-        # --- 5. CONTROLES NA BARRA LATERAL ---
         st.sidebar.markdown("---")
-        amostras_selecionadas = st.sidebar.multiselect(
-            "3. Selecione as Amostras para Análise:",
+        # Seletor de amostras para filtrar quais abas serão criadas
+        amostras_para_exibir = st.sidebar.multiselect(
+            "1. Selecione as Amostras para Visualização/Edição:",
             options=todas_amostras,
             default=todas_amostras
         )
         use_latex = st.sidebar.checkbox("Visualizar Matrizes em formato LaTeX", value=False)
+        
+        if not amostras_para_exibir:
+            st.warning("Por favor, selecione pelo menos uma amostra para análise.")
+            st.stop()
+            
+        st.header(f"2. Análise Instantânea por Amostra ({len(amostras_para_exibir)} Amostra(s))")
+        tabs = st.tabs(amostras_para_exibir)
 
-        if st.sidebar.button("4. Executar Análise"):
-            if not amostras_selecionadas:
-                st.warning("Por favor, selecione pelo menos uma amostra para análise.")
-                st.stop()
+        # Loop principal para criar as abas dinâmicas
+        for i, amostra in enumerate(amostras_para_exibir):
             
-            st.header(f"Resultados da Análise para {len(amostras_selecionadas)} Amostra(s)")
-            tabs = st.tabs(amostras_selecionadas)
+            # DataFrame original da amostra no estado
+            df_amostra_original = st.session_state.data_state[st.session_state.data_state['Amostra'] == amostra].copy()
             
-            for i, amostra in enumerate(amostras_selecionadas):
-                df_amostra = df_editado[df_editado['Amostra'] == amostra].copy()
+            with tabs[i]:
                 
-                with tabs[i]:
-                    st.subheader(f"Amostra: {amostra}")
+                # Layout de colunas para o fluxo de edição/visualização
+                col_editor, col_resultados = st.columns([1.5, 1])
+
+                with col_editor:
+                    st.markdown("##### 2.1 Edite Distância e Tempo (μs)")
                     
-                    if faltando := verificar_dados_amostra(df_amostra):
-                        st.error("⚠️ Dados insuficientes para o cálculo ortotrópico completo.")
-                        st.info(f"Amostra ignorada. Faltando: {', '.join(faltando)}")
+                    # O data_editor opera apenas nos dados desta amostra
+                    df_editado_tab = st.data_editor(
+                        df_amostra_original,
+                        key=f"editor_{amostra}",
+                        num_rows="dynamic", 
+                        use_container_width=True,
+                        column_config={
+                            "Distância (cm)": st.column_config.NumberColumn(format="%.3f"),
+                            "Tempo (μs)": st.column_config.NumberColumn(format="%.2f"),
+                            "Densidade (kg/m³)": st.column_config.NumberColumn(format="%.2f"),
+                            "Amostra": st.column_config.TextColumn(disabled=True),
+                            "Direção": st.column_config.TextColumn(disabled=False),
+                        }
+                    )
+                    
+                # Processamento dos dados editados
+                df_processar = df_editado_tab.copy()
+                df_processar.dropna(subset=['Densidade (kg/m³)', 'Distância (cm)', 'Tempo (μs)'], inplace=True)
+                
+                # Recálculo da Velocidade
+                df_processar['Velocidade (m/s)'] = (df_processar['Distância (cm)'] / df_processar['Tempo (μs)']) * 10000
+
+                # Atualiza o estado da sessão com os dados editados
+                # Remove as linhas antigas da amostra e adiciona as novas
+                st.session_state.data_state = st.session_state.data_state[st.session_state.data_state['Amostra'] != amostra]
+                st.session_state.data_state = pd.concat([st.session_state.data_state, df_editado_tab], ignore_index=True)
+
+
+                with col_resultados:
+                    st.markdown("##### 2.2 Resultados Instantâneos (MPa)")
+
+                    if faltando := verificar_dados_amostra(df_processar):
+                        st.error("⚠️ Dados insuficientes. Edite e complete.")
+                        st.info(f"Faltando Direções/Dados: {', '.join(faltando)}")
                         continue 
 
                     try:
-                        resultados = calcular_propriedades_elasticas(df_amostra, amostra)
+                        resultados = calcular_propriedades_elasticas(df_processar, amostra)
                         propriedades_list, df_rigidez, df_flexibilidade, diagnostico_list, C_matrix, S_matrix = resultados
 
-                        st.success("✅ Cálculo das 9 Constantes Elásticas concluído.")
-
-                        # Relatório de Diagnóstico (USANDO st.table)
-                        with st.expander("Diagnóstico de Conformidade da Rigidez", expanded=True):
-                             st.markdown("**Verificação das Condições de Ordem da Madeira:**")
-                             st.table(diagnostico_list)
-
-                        # Resultados em Colunas
-                        col_E, col_C = st.columns(2)
+                        st.success("Cálculo Ok. Ajuste um valor para recálculo.")
                         
-                        with col_E:
-                            st.markdown("##### Módulos e Coeficientes de Poisson")
-                            st.table(propriedades_list)
-
-                        with col_C:
-                            st.markdown("##### Matrizes de Rigidez e Flexibilidade")
-                            
-                            if use_latex:
-                                # Opção LaTeX
-                                latex_C_code = r"\mathbf{C}_{ij} \text{ [MPa]} = " + to_latex_matrix(C_matrix, precision=2)
-                                with st.expander("Copiar Código LaTeX da Matriz de Rigidez ($C_{ij}$)", expanded=False):
-                                    st.code(latex_C_code, language='latex')
-                                st.latex(latex_C_code)
-                                
-                                latex_S_code = r"\mathbf{S}_{ij} \text{ [MPa}^{-1}\text{]} = " + to_latex_matrix(S_matrix, precision=2, is_flexibility=True)
-                                with st.expander("Copiar Código LaTeX da Matriz de Flexibilidade ($S_{ij}$)", expanded=False):
-                                    st.code(latex_S_code, language='latex')
-                                st.latex(latex_S_code)
-                                
-                            else:
-                                # Opção DataFrame (Padrão)
-                                st.markdown("###### Matriz de Rigidez ($C_{ij}$) [MPa]")
-                                st.dataframe(df_rigidez.style.format(precision=2), width='stretch')
-
-                                st.markdown("###### Matriz de Flexibilidade ($S_{ij}$) [$MPa^{-1}$]")
-                                st.dataframe(df_flexibilidade.style.format('{:.2e}'), width='stretch')
+                        # Tabela de Propriedades ao lado
+                        st.table(propriedades_list)
                             
                     except np.linalg.LinAlgError:
-                        st.error("Erro de Inversão de Matriz. Inconsistência grave nos dados de rigidez. Verifique se os dados de densidade e velocidade são realistas.")
+                        st.error("Erro: Matriz de Rigidez Singular. Dados de velocidade ou densidade irrealistas.")
+                    except ValueError as ve:
+                        st.error(f"Erro de dados: {ve}")
                     except Exception as e:
-                        st.error(f"Erro inesperado durante o cálculo: {e}")
-                        
+                        st.error(f"Erro inesperado: {e}")
+                
+                # --- Visualização de Matrizes e Diagnóstico (Abaixo do Fluxo Principal) ---
+                st.markdown("---")
+                
+                # Relatório de Diagnóstico
+                if 'diagnostico_list' in locals():
+                    with st.expander("Diagnóstico de Conformidade da Rigidez", expanded=False):
+                         st.markdown("**Verificação das Condições de Ordem da Madeira:**")
+                         st.table(diagnostico_list)
+
+                # Matrizes de Rigidez e Flexibilidade
+                if 'C_matrix' in locals():
+                    st.markdown("##### 2.3 Matrizes de Rigidez e Flexibilidade")
+                    
+                    col_C_matriz, col_S_matriz = st.columns(2)
+                    
+                    with col_C_matriz:
+                         if use_latex:
+                             latex_C_code = r"\mathbf{C}_{ij} \text{ [MPa]} = " + to_latex_matrix(C_matrix, precision=2)
+                             st.markdown("###### Matriz de Rigidez ($C_{ij}$) [MPa]")
+                             st.latex(latex_C_code)
+                         else:
+                             st.markdown("###### Matriz de Rigidez ($C_{ij}$) [MPa]")
+                             st.dataframe(df_rigidez.style.format(precision=2), use_container_width=True)
+
+                    with col_S_matriz:
+                        if use_latex:
+                            latex_S_code = r"\mathbf{S}_{ij} \text{ [MPa}^{-1}\text{]} = " + to_latex_matrix(S_matrix, precision=2, is_flexibility=True)
+                            st.markdown("###### Matriz de Flexibilidade ($S_{ij}$) [$MPa^{-1}$]")
+                            st.latex(latex_S_code)
+                        else:
+                            st.markdown("###### Matriz de Flexibilidade ($S_{ij}$) [$MPa^{-1}$]")
+                            st.dataframe(df_flexibilidade.style.format('{:.2e}'), use_container_width=True)
+                            
     except Exception as e:
-        st.error("Erro fatal ao carregar ou processar o arquivo CSV. Verifique se as colunas estão corretas e o separador decimal é a vírgula (',').")
+        st.error("Erro fatal ao carregar ou processar o arquivo CSV. Verifique se as colunas e o separador decimal (vírgula ',') estão corretos.")
         st.exception(e)

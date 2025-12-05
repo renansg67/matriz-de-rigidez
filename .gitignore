@@ -36,3 +36,5 @@ env.bak/
 # Arquivos de Lock de Ambientes (se usados)
 Pipfile.lock
 poetry.lock  # Se estiver usando Poetry
+
+amostras_completas.csv
